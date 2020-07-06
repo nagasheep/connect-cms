@@ -102,14 +102,14 @@
     }
 
     // plugins
-    $plugins = 'file image imagetools link autolink preview textcolor code table lists advlist';
+    $plugins = 'file image imagetools link autolink preview textcolor code table lists advlist fontawesome';
     if (config('connect.OSWS_TRANSLATE_AGREEMENT') === true) {
         $plugins .= ' translate';
     }
     $plugins = "plugins  : '" . $plugins . "',";
 
     // toolbar
-    $toolbar = 'bold italic underline strikethrough subscript superscript | formatselect | styleselect | forecolor backcolor | removeformat | table | numlist bullist | blockquote | alignleft aligncenter alignright alignjustify | outdent indent | link jbimages | image file | preview | code ';
+    $toolbar = 'bold italic underline strikethrough subscript superscript | formatselect | styleselect | forecolor backcolor | removeformat | table | numlist bullist | blockquote | alignleft aligncenter alignright alignjustify | outdent indent | link jbimages | image file | preview | code | fontawesome ';
     if (config('connect.OSWS_TRANSLATE_AGREEMENT') === true) {
         $toolbar .= '| translate ';
     }
@@ -122,6 +122,7 @@
 
 @endphp
 <input type="hidden" name="page_id" value="{{$page_id}}">
+<link rel="stylesheet" href="/fontawesome/css/fontawesome.min.css" media="all">
 <script type="text/javascript" src="{{url('/')}}/js/tinymce/tinymce.min.js"></script>
 <script type="text/javascript">
     tinymce.init({
