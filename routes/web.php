@@ -104,6 +104,12 @@ Route::get('/language/{language_or_1stdir?}/{link_or_after2nd?}', 'Core\DefaultC
 // パスワード付きページのアクション
 Route::match(['get', 'post'], '/password/{action}/{page_id?}', 'Core\PasswordController@invoke')->name('password_input');
 
+// https://docs.microsoft.com/ja-jp/graph/tutorials/php
+Route::get('/', 'HomeController@welcome');
+Route::get('/signin', 'AuthController@signin');
+Route::get('/callback', 'AuthController@callback');
+Route::get('/signout', 'AuthController@signout');
+
 // 基本のアクション
 // コアの画面処理や各プラグインの処理はここから呼び出す。
 Route::get( '{all}', 'Core\DefaultController')->where('all', '.*')->name('get_all');
