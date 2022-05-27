@@ -32,6 +32,7 @@ use App\Models\Common\Uploads;
 use App\Models\Core\Configs;
 use App\Models\Core\FrameConfig;
 use App\Models\Core\UsersColumns;
+use App\Models\Core\UsersColumnsSelects;
 use App\Models\Core\UsersInputCols;
 use App\Models\Core\UsersRoles;
 use App\Models\User\Bbses\Bbs;
@@ -372,6 +373,7 @@ trait MigrationTrait
             UsersRoles::where('users_id', '<>', $first_user->id)->delete();
             User::where('id', '<>', $first_user->id)->delete();
             UsersColumns::truncate();
+            UsersColumnsSelects::truncate();
             UsersInputCols::truncate();
             MigrationMapping::where('target_source_table', 'users')->delete();
         }
@@ -530,7 +532,7 @@ trait MigrationTrait
 
             // 消してしまった初期登録のカテゴリなし、基本項目セットの再登録
             // php artisan db:seed --class=DefaultReservationsTableSeeder
-            Artisan::call('db:seed --class=DefaultReservationsTableSeeder');
+            Artisan::call('db:seed --class=DefaultReservationsTableSeeder --force');
 
             $buckets_ids = Buckets::where('plugin_name', 'reservations')->pluck('id');
             BucketsRoles::whereIn('buckets_id', $buckets_ids)->delete();
@@ -594,7 +596,7 @@ trait MigrationTrait
     }
 
     /**
-     * モニターログ出力
+     * エラーログ出力
      */
     private function putError($destination, $message, $detail = null, $nc2_block = null)
     {
@@ -1468,8 +1470,9 @@ trait MigrationTrait
                 $mapping->delete();
             }
 
+            $column_type = $this->getArrayValue($ini, 'users_columns_base', 'column_type');
             $users_column = UsersColumns::create([
-                'column_type'      => $this->getArrayValue($ini, 'users_columns_base', 'column_type'),
+                'column_type'      => $column_type,
                 'column_name'      => $this->getArrayValue($ini, 'users_columns_base', 'column_name'),
                 'required'         => intval($this->getArrayValue($ini, 'users_columns_base', 'required', 0)),
                 'caption'          => $this->getArrayValue($ini, 'users_columns_base', 'caption'),
@@ -1486,6 +1489,35 @@ trait MigrationTrait
                 'source_key'           => $nc2_item_id,
                 'destination_key'      => $users_column->id,
             ]);
+
+            // 選択肢型の追加
+            if (in_array($column_type, ['radio','select','checkbox'])) {
+                // マッピングテーブルの取得
+                $mapping = MigrationMapping::where('target_source_table', 'users_columns_selects')->where('source_key', $nc2_item_id)->first();
+                // マッピングテーブルを確認して、あれば削除
+                if (!empty($mapping)) {
+                    // ユーザセレクトカラム削除
+                    UsersColumnsSelects::where('id', $mapping->destination_key)->delete();
+                    // マッピングテーブル削除
+                    $mapping->delete();
+                }
+                $select_values = explode('|', $this->getArrayValue($ini, 'users_columns_selects_base', 'value'));
+                foreach ($select_values as $i => $value) {
+                    $display_sequence = $i;
+                    $display_sequence++;
+                    $users_column_select = UsersColumnsSelects::create([
+                        'users_columns_id' => $users_column->id,
+                        'value'            => $value,
+                        'display_sequence' => $display_sequence,
+                    ]);
+                }
+                // マッピングテーブルの追加
+                $mapping = MigrationMapping::create([
+                    'target_source_table'  => 'users_columns_selects',
+                    'source_key'           => $nc2_item_id,
+                    'destination_key'      => $users_column->id,
+                ]);
+            }
         }
 
         // ユーザ定義・ファイルの存在確認
@@ -2295,6 +2327,9 @@ trait MigrationTrait
         // リンクリスト定義の取り込み
         $linklists_ini_paths = File::glob(storage_path() . '/app/' . $this->getImportPath('linklists/linklist_*.ini'));
 
+        // ユーザ取得
+        $users = User::get();
+
         // リンクリスト定義のループ
         foreach ($linklists_ini_paths as $linklists_ini_path) {
             // ini_file の解析
@@ -2328,10 +2363,24 @@ trait MigrationTrait
                 if (array_key_exists('linklist_base', $linklist_ini) && array_key_exists('linklist_name', $linklist_ini['linklist_base'])) {
                     $linklist_name = $linklist_ini['linklist_base']['linklist_name'];
                 }
-                $bucket = Buckets::create(['bucket_name' => $linklist_name, 'plugin_name' => 'linklists']);
+                $bucket = new Buckets(['bucket_name' => $linklist_name, 'plugin_name' => 'linklists']);
+                $bucket->created_at = $this->getDatetimeFromIniAndCheckFormat($linklist_ini, 'source_info', 'created_at');
+                $bucket->updated_at = $this->getDatetimeFromIniAndCheckFormat($linklist_ini, 'source_info', 'updated_at');
+                // 登録更新日時を自動更新しない
+                $bucket->timestamps = false;
+                $bucket->save();
 
                 $view_count = 10;
                 $linklist = Linklist::create(['bucket_id' => $bucket->id, 'name' => $linklist_name, 'view_count' => $view_count]);
+                $linklist->created_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($linklist_ini, 'source_info', 'insert_login_id', null));
+                $linklist->created_name = $this->getArrayValue($linklist_ini, 'source_info', 'created_name', null);
+                $linklist->created_at   = $this->getDatetimeFromIniAndCheckFormat($linklist_ini, 'source_info', 'created_at');
+                $linklist->updated_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($linklist_ini, 'source_info', 'update_login_id', null));
+                $linklist->updated_name = $this->getArrayValue($linklist_ini, 'source_info', 'updated_name', null);
+                $linklist->updated_at   = $this->getDatetimeFromIniAndCheckFormat($linklist_ini, 'source_info', 'updated_at');
+                // 登録更新日時を自動更新しない
+                $linklist->timestamps = false;
+                $linklist->save();
 
                 // マッピングテーブルの追加
                 $mapping = MigrationMapping::create([
@@ -2717,6 +2766,9 @@ trait MigrationTrait
         // フォーム定義の取り込み
         $form_ini_paths = File::glob(storage_path() . '/app/' . $this->getImportPath('forms/form_*.ini'));
 
+        // ユーザ取得
+        $users = User::get();
+
         // フォーム定義のループ
         foreach ($form_ini_paths as $form_ini_path) {
             // ini_file の解析
@@ -2770,7 +2822,12 @@ trait MigrationTrait
             if (array_key_exists('form_base', $form_ini) && array_key_exists('forms_name', $form_ini['form_base'])) {
                 $form_name = $form_ini['form_base']['forms_name'];
             }
-            $bucket = Buckets::create(['bucket_name' => $form_name, 'plugin_name' => 'forms']);
+            $bucket = new Buckets(['bucket_name' => $form_name, 'plugin_name' => 'forms']);
+            $bucket->created_at = $this->getDatetimeFromIniAndCheckFormat($form_ini, 'source_info', 'created_at');
+            $bucket->updated_at = $this->getDatetimeFromIniAndCheckFormat($form_ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $bucket->timestamps = false;
+            $bucket->save();
 
             // 登録期間で制御する
             $regist_control_flag = 0;
@@ -2804,7 +2861,7 @@ trait MigrationTrait
             ];
             $mail_subject = str_replace(array_keys($replace_tags), array_values($replace_tags), $form_ini['form_base']['mail_subject']);
             $mail_format = str_replace(array_keys($replace_tags), array_values($replace_tags), $mail_format);
-            $form = Forms::create([
+            $form = new Forms([
                 'bucket_id'           => $bucket->id,
                 'forms_name'          => $form_name,
                 'mail_send_flag'      => $form_ini['form_base']['mail_send_flag'],
@@ -2819,6 +2876,15 @@ trait MigrationTrait
                 'regist_control_flag' => $regist_control_flag,
                 'regist_to'           => $regist_to,
             ]);
+            $form->created_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($form_ini, 'source_info', 'insert_login_id', null));
+            $form->created_name = $this->getArrayValue($form_ini, 'source_info', 'created_name', null);
+            $form->created_at   = $this->getDatetimeFromIniAndCheckFormat($form_ini, 'source_info', 'created_at');
+            $form->updated_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($form_ini, 'source_info', 'update_login_id', null));
+            $form->updated_name = $this->getArrayValue($form_ini, 'source_info', 'updated_name', null);
+            $form->updated_at   = $this->getDatetimeFromIniAndCheckFormat($form_ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $form->timestamps = false;
+            $form->save();
 
             // マッピングテーブルの追加
             $mapping = MigrationMapping::create([
@@ -2890,18 +2956,40 @@ trait MigrationTrait
 
             // 行のループ
             foreach ($data_txt_ini['form_inputs']['input'] as $data_id => $null) {
-                $forms_inputs = FormsInputs::create([
+                $forms_inputs = new FormsInputs([
                     'forms_id' => $form->id,
                 ]);
+                $forms_inputs->created_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($data_txt_ini, $data_id, 'insert_login_id', null));
+                $forms_inputs->created_name = $this->getArrayValue($data_txt_ini, $data_id, 'created_name', null);
+                $forms_inputs->created_at   = $this->getDatetimeFromIniAndCheckFormat($data_txt_ini, $data_id, 'created_at');
+                $forms_inputs->updated_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($data_txt_ini, $data_id, 'update_login_id', null));
+                $forms_inputs->updated_name = $this->getArrayValue($data_txt_ini, $data_id, 'updated_name', null);
+                $forms_inputs->updated_at   = $this->getDatetimeFromIniAndCheckFormat($data_txt_ini, $data_id, 'updated_at');
+                // 登録更新日時を自動更新しない
+                $forms_inputs->timestamps = false;
+                $forms_inputs->save();
 
                 // データベースのバルクINSERT対応
                 $bulks = array();
 
                 // 項目データのループ
                 foreach ($data_txt_ini[$data_id] as $item_id => $data) {
-                    $bulks[] = ['forms_inputs_id'  => $forms_inputs->id,
+                    if (!isset($column_ids[$item_id])) {
+                        // column_ids 以外のカラムは登録しない
+                        continue;
+                    }
+
+                    $bulks[] = [
+                        'forms_inputs_id'  => $forms_inputs->id,
                         'forms_columns_id' => $column_ids[$item_id],
-                        'value'            => $data];
+                        'value'            => $data,
+                        'created_id'       => $this->getUserIdFromLoginId($users, $this->getArrayValue($data_txt_ini, $data_id, 'insert_login_id', null)),
+                        'created_name'     => $this->getArrayValue($data_txt_ini, $data_id, 'created_name', null),
+                        'created_at'       => $this->getDatetimeFromIniAndCheckFormat($data_txt_ini, $data_id, 'created_at'),
+                        'updated_id'       => $this->getUserIdFromLoginId($users, $this->getArrayValue($data_txt_ini, $data_id, 'update_login_id', null)),
+                        'updated_name'     => $this->getArrayValue($data_txt_ini, $data_id, 'updated_name', null),
+                        'updated_at'       => $this->getDatetimeFromIniAndCheckFormat($data_txt_ini, $data_id, 'updated_at'),
+                    ];
                     /*
                     $forms_inputs_cols = FormsInputCols::create([
                         'forms_inputs_id'  => $forms_inputs->id,
@@ -2931,6 +3019,9 @@ trait MigrationTrait
 
         // 新着情報定義の取り込み
         $whatsnew_ini_paths = File::glob(storage_path() . '/app/' . $this->getImportPath('whatsnews/whatsnew_*.ini'));
+
+        // ユーザ取得
+        $users = User::get();
 
         // 新着情報定義のループ
         foreach ($whatsnew_ini_paths as $whatsnew_ini_paths) {
@@ -2972,9 +3063,14 @@ trait MigrationTrait
             if (array_key_exists('whatsnew_base', $whatsnew_ini) && array_key_exists('whatsnew_name', $whatsnew_ini['whatsnew_base'])) {
                 $whatsnew_name = $whatsnew_ini['whatsnew_base']['whatsnew_name'];
             }
-            $bucket = Buckets::create(['bucket_name' => $whatsnew_name, 'plugin_name' => 'whatsnews']);
+            $bucket = new Buckets(['bucket_name' => $whatsnew_name, 'plugin_name' => 'whatsnews']);
+            $bucket->created_at = $this->getDatetimeFromIniAndCheckFormat($whatsnew_ini, 'source_info', 'created_at');
+            $bucket->updated_at = $this->getDatetimeFromIniAndCheckFormat($whatsnew_ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $bucket->timestamps = false;
+            $bucket->save();
 
-            $whatsnew = Whatsnews::create([
+            $whatsnew = new Whatsnews([
                 'bucket_id'        => $bucket->id,
                 'whatsnew_name'    => $whatsnew_name,
                 'view_pattern'     => $whatsnew_ini['whatsnew_base']['view_pattern'],
@@ -2987,6 +3083,15 @@ trait MigrationTrait
                 'target_plugins'   => $whatsnew_ini['whatsnew_base']['target_plugins'],
                 'frame_select'     => $whatsnew_ini['whatsnew_base']['frame_select'],
             ]);
+            $whatsnew->created_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($whatsnew_ini, 'source_info', 'insert_login_id', null));
+            $whatsnew->created_name = $this->getArrayValue($whatsnew_ini, 'source_info', 'created_name', null);
+            $whatsnew->created_at   = $this->getDatetimeFromIniAndCheckFormat($whatsnew_ini, 'source_info', 'created_at');
+            $whatsnew->updated_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($whatsnew_ini, 'source_info', 'update_login_id', null));
+            $whatsnew->updated_name = $this->getArrayValue($whatsnew_ini, 'source_info', 'updated_name', null);
+            $whatsnew->updated_at   = $this->getDatetimeFromIniAndCheckFormat($whatsnew_ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $whatsnew->timestamps = false;
+            $whatsnew->save();
 
             // マッピングテーブルの追加
             $mapping = MigrationMapping::create([
@@ -3011,6 +3116,9 @@ trait MigrationTrait
 
         // キャビネット定義の取り込み
         $ini_paths = File::glob(storage_path() . '/app/' . $this->getImportPath('cabinets/cabinet_*.ini'));
+
+        // ユーザ取得
+        $users = User::get();
 
         // キャビネット定義のループ
         foreach ($ini_paths as $ini_path) {
@@ -3047,20 +3155,43 @@ trait MigrationTrait
             if (array_key_exists('cabinet_base', $ini) && array_key_exists('cabinet_name', $ini['cabinet_base'])) {
                 $cabinet_name = $ini['cabinet_base']['cabinet_name'];
             }
-            $bucket = Buckets::create(['bucket_name' => $cabinet_name, 'plugin_name' => 'cabinets']);
+            $bucket = new Buckets(['bucket_name' => $cabinet_name, 'plugin_name' => 'cabinets']);
+            $bucket->created_at = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'created_at');
+            $bucket->updated_at = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $bucket->timestamps = false;
+            $bucket->save();
 
-            $cabinet = Cabinet::create([
+            $cabinet = new Cabinet([
                 'bucket_id' => $bucket->id,
                 'name' => $cabinet_name,
                 'upload_max_size' => intval($ini['cabinet_base']['upload_max_size']) / 1024,
             ]);
+            $cabinet->created_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($ini, 'source_info', 'insert_login_id', null));
+            $cabinet->created_name = $this->getArrayValue($ini, 'source_info', 'created_name', null);
+            $cabinet->created_at   = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'created_at');
+            $cabinet->updated_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($ini, 'source_info', 'update_login_id', null));
+            $cabinet->updated_name = $this->getArrayValue($ini, 'source_info', 'updated_name', null);
+            $cabinet->updated_at   = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $cabinet->timestamps = false;
+            $cabinet->save();
 
             // ルートディレクトを作成する
-            $root_cabinet_content = CabinetContent::create([
+            $root_cabinet_content = new CabinetContent([
                 'cabinet_id' => $cabinet->id,
                 'name' => $cabinet_name,
                 'is_folder' => CabinetContent::is_folder_on,
             ]);
+            $root_cabinet_content->created_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($ini, 'source_info', 'insert_login_id', null));
+            $root_cabinet_content->created_name = $this->getArrayValue($ini, 'source_info', 'created_name', null);
+            $root_cabinet_content->created_at   = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'created_at');
+            $root_cabinet_content->updated_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($ini, 'source_info', 'update_login_id', null));
+            $root_cabinet_content->updated_name = $this->getArrayValue($ini, 'source_info', 'updated_name', null);
+            $root_cabinet_content->updated_at   = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $root_cabinet_content->timestamps = false;
+            $root_cabinet_content->save();
 
             // マッピングテーブルの追加
             $mapping = MigrationMapping::create([
@@ -3089,13 +3220,23 @@ trait MigrationTrait
                     $upload_mapping = MigrationMapping::where('target_source_table', 'uploads')
                                         ->where('source_key', $tsv_cols[2])->first();
 
-                    $cabinet_content = CabinetContent::create([
+                    $cabinet_content = new CabinetContent([
                         'cabinet_id' => $cabinet->id,
                         'upload_id' => $upload_mapping ? $upload_mapping->destination_key : null,
                         'name' => empty($tsv_cols[5]) ? $tsv_cols[4] : $tsv_cols[4] . '.' . $tsv_cols[5],
                         'is_folder' => $tsv_cols[9],
                         'comment' => $tsv_cols[12],
                     ]);
+                    $cabinet_content->created_id = $this->getUserIdFromLoginId($users, $tsv_cols[15]);
+                    $cabinet_content->created_name = $tsv_cols[14];
+                    $cabinet_content->created_at = $this->getDatetimeFromTsvAndCheckFormat(13, $tsv_cols, '13');
+                    $cabinet_content->updated_id = $this->getUserIdFromLoginId($users, $tsv_cols[18]);
+                    $cabinet_content->updated_name = $tsv_cols[17];
+                    $cabinet_content->updated_at = $this->getDatetimeFromTsvAndCheckFormat(16, $tsv_cols, '16');
+                    // 登録更新日時を自動更新しない
+                    $cabinet_content->timestamps = false;
+                    $cabinet_content->save();
+
                     $cabinet_content->migrate_parent_id = $tsv_cols[3];
                     $migrated_contents->push($cabinet_content);
                     $mapping = MigrationMapping::create([
@@ -3116,6 +3257,8 @@ trait MigrationTrait
                         $cabinet_content->parent_id = $mapping_migrated->where('source_key', $cabinet_content->migrate_parent_id)
                                                         ->first()->destination_key;
                     }
+                    // 登録更新日時を自動更新しない
+                    $cabinet_content->timestamps = false;
                     $cabinet_content->save();
                 }
                 CabinetContent::fixTree();
@@ -3313,6 +3456,9 @@ trait MigrationTrait
         // カウンター定義の取り込み
         $ini_paths = File::glob(storage_path() . '/app/' . $this->getImportPath('counters/counter_*.ini'));
 
+        // ユーザ取得
+        $users = User::get();
+
         // カウンター定義のループ
         foreach ($ini_paths as $ini_path) {
             // ini_file の解析
@@ -3345,12 +3491,26 @@ trait MigrationTrait
 
             // Buckets テーブルと Counters テーブル、マッピングテーブルを追加
             $counter_name = '無題';
-            $bucket = Buckets::create(['bucket_name' => $counter_name, 'plugin_name' => 'counters']);
+            $bucket = new Buckets(['bucket_name' => $counter_name, 'plugin_name' => 'counters']);
+            $bucket->created_at = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'created_at');
+            $bucket->updated_at = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $bucket->timestamps = false;
+            $bucket->save();
 
-            $counter = Counter::create([
+            $counter = new Counter([
                 'bucket_id' => $bucket->id,
                 'name' => $counter_name,
             ]);
+            $counter->created_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($ini, 'source_info', 'insert_login_id', null));
+            $counter->created_name = $this->getArrayValue($ini, 'source_info', 'created_name', null);
+            $counter->created_at   = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'created_at');
+            $counter->updated_id   = $this->getUserIdFromLoginId($users, $this->getArrayValue($ini, 'source_info', 'update_login_id', null));
+            $counter->updated_name = $this->getArrayValue($ini, 'source_info', 'updated_name', null);
+            $counter->updated_at   = $this->getDatetimeFromIniAndCheckFormat($ini, 'source_info', 'updated_at');
+            // 登録更新日時を自動更新しない
+            $counter->timestamps = false;
+            $counter->save();
 
             // カウントを作成する
             $counter_count = CounterCount::create([
@@ -5563,7 +5723,12 @@ trait MigrationTrait
 
         // Buckets 登録
         // echo "Buckets 登録\n";
-        $bucket = Buckets::create(['bucket_name' => '無題', 'plugin_name' => 'contents']);
+        $bucket = new Buckets(['bucket_name' => '無題', 'plugin_name' => 'contents']);
+        $bucket->created_at   = $this->getDatetimeFromIniAndCheckFormat($frame_ini, 'contents', 'created_at');
+        $bucket->updated_at   = $this->getDatetimeFromIniAndCheckFormat($frame_ini, 'contents', 'updated_at');
+        // 登録更新日時を自動更新しない
+        $bucket->timestamps = false;
+        $bucket->save();
 
         // Frames 登録
         $this->importPluginFrame($page, $frame_ini, $display_sequence, $bucket);
@@ -7204,9 +7369,10 @@ trait MigrationTrait
         $nc2_any_items = collect([]);
         $nc2_export_user_items = $this->getMigrationConfig('users', 'nc2_export_user_items');
         if ($nc2_export_user_items) {
-            $nc2_any_items = Nc2Item::select('items.*', 'items_desc.description')
+            $nc2_any_items = Nc2Item::select('items.*', 'items_desc.description', 'items_options.options')
                 ->whereIn('items.item_name', $nc2_export_user_items)
                 ->leftJoin('items_desc', 'items_desc.item_id', '=', 'items.item_id')
+                ->leftJoin('items_options', 'items_options.item_id', '=', 'items.item_id')
                 ->orderBy('items.col_num')
                 ->orderBy('items.row_num')
                 ->get();
@@ -7269,7 +7435,8 @@ trait MigrationTrait
                 // 任意項目
                 foreach ($nc2_any_items as $nc2_any_item) {
                     $item_name = "item_{$nc2_any_item->item_id}";
-                    $users_ini .= "{$item_name}            = \"" . $nc2_user->$item_name . "\"\n";
+                    $item_value = rtrim($nc2_user->$item_name, '|');// 最後のパイプは削除する
+                    $users_ini .= "{$item_name}            = \"" . $item_value . "\"\n";
                 }
             }
 
@@ -7297,9 +7464,10 @@ trait MigrationTrait
                 'text' => UserColumnType::text,
                 'email' => UserColumnType::mail,
                 'mobile_email' => UserColumnType::mail,
-                // 'radio' => UserColumnType::radio,
+                'radio' => UserColumnType::radio,
                 'textarea' => UserColumnType::textarea,
-                // 'select' => UserColumnType::select,
+                'select' => UserColumnType::select,
+                'checkbox' => UserColumnType::checkbox,
             ];
 
             // 未対応
@@ -7308,8 +7476,6 @@ trait MigrationTrait
                 'file',
                 'label',
                 'system',
-                'radio',
-                'select',
             ];
 
             $user_column_type = $nc2_any_item->type;
@@ -7320,6 +7486,19 @@ trait MigrationTrait
 
             } elseif (array_key_exists($user_column_type, $convert_user_column_types)) {
                 $user_column_type = $convert_user_column_types[$user_column_type];
+                $users_columns_selects_ini  = "[users_columns_selects_base]\n";
+                switch ($user_column_type) {
+                    case 'radio':
+                    case 'select':
+                    case 'checkbox':
+                        $options = rtrim($nc2_any_item->options, '|');// 最後のパイプは削除する
+                        $users_columns_selects_ini .= "value      = \"" . $options . "\"\n";
+                        $users_columns_selects_ini .= "\n";
+                        break;
+                    default:
+                        $users_columns_selects_ini = "\n";
+                        break;
+                }
 
             } else {
                 // 未対応に未指定
@@ -7335,6 +7514,7 @@ trait MigrationTrait
             $users_columns_ini .= "caption          = \"" . $nc2_any_item->description . "\"\n";
             $users_columns_ini .= "display_sequence = " . ($i + 1) . "\n";
             $users_columns_ini .= "\n";
+            $users_columns_ini .= $users_columns_selects_ini;
             $users_columns_ini .= "[source_info]\n";
             $users_columns_ini .= "item_id = " . $nc2_any_item->item_id . "\n";
 
@@ -7569,7 +7749,7 @@ trait MigrationTrait
                 $journals_tsv .= $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_journal_post->insert_user_id) . "\t";   // [13]
                 $journals_tsv .= $this->getCCDatetime($nc2_journal_post->update_time)                             . "\t";   // [14]
                 $journals_tsv .= $nc2_journal_post->update_user_name                                              . "\t";   // [15]
-                $journals_tsv .= $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_journal_post->update_user_id) . "\t";   // [16]
+                $journals_tsv .= $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_journal_post->update_user_id);          // [16]
 
                 // 記事のタイトルの一覧
                 // タイトルに " あり
@@ -8024,6 +8204,9 @@ trait MigrationTrait
             return;
         }
 
+        // nc2の全ユーザ取得
+        $nc2_users = Nc2User::get();
+
         // NC2リンクリスト（Linklist）のループ
         foreach ($nc2_linklists as $nc2_linklist) {
             $room_ids = $this->getMigrationConfig('basic', 'nc2_export_room_ids');
@@ -8089,6 +8272,12 @@ trait MigrationTrait
             $linklists_ini .= "linklist_id = " . $nc2_linklist->linklist_id . "\n";
             $linklists_ini .= "room_id = " . $nc2_linklist->room_id . "\n";
             $linklists_ini .= "module_name = \"linklist\"\n";
+            $linklists_ini .= "created_at      = \"" . $this->getCCDatetime($nc2_linklist->insert_time) . "\"\n";
+            $linklists_ini .= "created_name    = \"" . $nc2_linklist->insert_user_name . "\"\n";
+            $linklists_ini .= "insert_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_linklist->insert_user_id) . "\"\n";
+            $linklists_ini .= "updated_at      = \"" . $this->getCCDatetime($nc2_linklist->update_time) . "\"\n";
+            $linklists_ini .= "updated_name    = \"" . $nc2_linklist->update_user_name . "\"\n";
+            $linklists_ini .= "update_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_linklist->update_user_id) . "\"\n";
 
             // NC2リンクリストで使っているカテゴリ（linklist_category）のみ移行する。
             $linklists_ini .= "\n";
@@ -8167,7 +8356,7 @@ trait MigrationTrait
     }
 
     /**
-     * NC2：汎用データベース（Databases）の移行
+     * NC2：汎用データベース（Multidatabase）の移行
      */
     private function nc2ExportMultidatabase($redo)
     {
@@ -8550,6 +8739,9 @@ trait MigrationTrait
             return;
         }
 
+        // nc2の全ユーザ取得
+        $nc2_users = Nc2User::get();
+
         // NC2登録フォーム（Registration）のループ
         foreach ($nc2_registrations as $nc2_registration) {
             $room_ids = $this->getMigrationConfig('basic', 'nc2_export_room_ids');
@@ -8616,11 +8808,18 @@ trait MigrationTrait
             $registration_ini .= "active_flag = "     . $nc2_registration->active_flag . "\n";
             $registration_ini .= "room_id = "         . $nc2_registration->room_id . "\n";
             $registration_ini .= "module_name = \"registration\"\n";
+            $registration_ini .= "created_at      = \"" . $this->getCCDatetime($nc2_registration->insert_time) . "\"\n";
+            $registration_ini .= "created_name    = \"" . $nc2_registration->insert_user_name . "\"\n";
+            $registration_ini .= "insert_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_registration->insert_user_id) . "\"\n";
+            $registration_ini .= "updated_at      = \"" . $this->getCCDatetime($nc2_registration->update_time) . "\"\n";
+            $registration_ini .= "updated_name    = \"" . $nc2_registration->update_user_name . "\"\n";
+            $registration_ini .= "update_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_registration->update_user_id) . "\"\n";
 
             // 登録フォームのカラム情報
             $registration_items = Nc2RegistrationItem::where('registration_id', $registration_id)
-                                                               ->orderBy('item_sequence', 'asc')
-                                                               ->get();
+                ->orderBy('item_sequence', 'asc')
+                ->get();
+
             if (empty($registration_items)) {
                 continue;
             }
@@ -8694,21 +8893,40 @@ trait MigrationTrait
                 // データ部
                 $registration_data_header = "[form_inputs]\n";
                 $registration_data = "";
-                $registration_item_datas = Nc2RegistrationItemData::select('registration_item_data.*')
-                                                                 ->join('registration_item', function ($join) {
-                                                                     $join->on('registration_item.registration_id', '=', 'registration_item_data.registration_id')
-                                                                          ->on('registration_item.item_id', '=', 'registration_item_data.item_id');
-                                                                 })
-                                                                 ->where('registration_item_data.registration_id', $registration_id)
-                                                                 ->orderBy('registration_item_data.data_id', 'asc')
-                                                                 ->orderBy('registration_item.item_sequence', 'asc')
-                                                                 ->get();
+                $registration_item_datas = Nc2RegistrationItemData::
+                    select(
+                        'registration_item_data.*',
+                        'registration_data.insert_time AS data_insert_time',
+                        'registration_data.insert_user_name AS data_insert_user_name',
+                        'registration_data.insert_user_id AS data_insert_user_id',
+                        'registration_data.update_time AS data_update_time',
+                        'registration_data.update_user_name AS data_update_user_name',
+                        'registration_data.update_user_id AS data_update_user_id'
+                    )
+                    ->join('registration_item', function ($join) {
+                        $join->on('registration_item.registration_id', '=', 'registration_item_data.registration_id')
+                            ->on('registration_item.item_id', '=', 'registration_item_data.item_id');
+                    })
+                    ->join('registration_data', function ($join) {
+                        $join->on('registration_data.registration_id', '=', 'registration_item_data.registration_id')
+                            ->on('registration_data.data_id', '=', 'registration_item_data.data_id');
+                    })
+                    ->where('registration_item_data.registration_id', $registration_id)
+                    ->orderBy('registration_item_data.data_id', 'asc')
+                    ->orderBy('registration_item.item_sequence', 'asc')
+                    ->get();
 
                 $data_id = null;
                 foreach ($registration_item_datas as $registration_item_data) {
                     if ($registration_item_data->data_id != $data_id) {
                         $registration_data_header .= "input[" . $registration_item_data->data_id . "] = \"\"\n";
                         $registration_data .= "\n[" . $registration_item_data->data_id . "]\n";
+                        $registration_data .= "created_at      = \"" . $this->getCCDatetime($registration_item_data->data_insert_time) . "\"\n";
+                        $registration_data .= "created_name    = \"" . $registration_item_data->data_insert_user_name . "\"\n";
+                        $registration_data .= "insert_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $registration_item_data->data_insert_user_id) . "\"\n";
+                        $registration_data .= "updated_at      = \"" . $this->getCCDatetime($registration_item_data->data_update_time) . "\"\n";
+                        $registration_data .= "updated_name    = \"" . $registration_item_data->data_update_user_name . "\"\n";
+                        $registration_data .= "update_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $registration_item_data->data_update_user_id) . "\"\n";
                         $data_id = $registration_item_data->data_id;
                     }
                     $registration_data .= $registration_item_data->item_id . " = \"" . str_replace("\n", '\n', $registration_item_data->item_data_value) . "\"\n";
@@ -8746,6 +8964,9 @@ trait MigrationTrait
         if ($nc2_whatsnew_blocks->isEmpty()) {
             return;
         }
+
+        // nc2の全ユーザ取得
+        $nc2_users = Nc2User::get();
 
         // NC2新着情報（Whatsnew）のループ
         foreach ($nc2_whatsnew_blocks as $nc2_whatsnew_block) {
@@ -8797,6 +9018,12 @@ trait MigrationTrait
             $whatsnew_ini .= "whatsnew_block_id = " . $whatsnew_block_id . "\n";
             $whatsnew_ini .= "room_id = "           . $nc2_whatsnew_block->room_id . "\n";
             $whatsnew_ini .= "module_name = \"whatsnew\"\n";
+            $whatsnew_ini .= "created_at      = \"" . $this->getCCDatetime($nc2_whatsnew_block->insert_time) . "\"\n";
+            $whatsnew_ini .= "created_name    = \"" . $nc2_whatsnew_block->insert_user_name . "\"\n";
+            $whatsnew_ini .= "insert_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_whatsnew_block->insert_user_id) . "\"\n";
+            $whatsnew_ini .= "updated_at      = \"" . $this->getCCDatetime($nc2_whatsnew_block->update_time) . "\"\n";
+            $whatsnew_ini .= "updated_name    = \"" . $nc2_whatsnew_block->update_user_name . "\"\n";
+            $whatsnew_ini .= "update_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_whatsnew_block->update_user_id) . "\"\n";
 
             // 新着情報の設定を出力
             //Storage::put($this->getImportPath('whatsnews/whatsnew_') . $this->zeroSuppress($whatsnew_block_id) . '.ini', $whatsnew_ini);
@@ -8830,6 +9057,9 @@ trait MigrationTrait
             return;
         }
 
+        // nc2の全ユーザ取得
+        $nc2_users = Nc2User::get();
+
         // NC2キャビネット（Cabinet）のループ
         foreach ($cabinet_manages as $cabinet_manage) {
             $room_ids = $this->getMigrationConfig('basic', 'nc2_export_room_ids');
@@ -8854,6 +9084,12 @@ trait MigrationTrait
             $ini .= "cabinet_id = " . $cabinet_manage->cabinet_id . "\n";
             $ini .= "room_id = " . $cabinet_manage->room_id . "\n";
             $ini .= "module_name = \"cabinet\"\n";
+            $ini .= "created_at      = \"" . $this->getCCDatetime($cabinet_manage->insert_time) . "\"\n";
+            $ini .= "created_name    = \"" . $cabinet_manage->insert_user_name . "\"\n";
+            $ini .= "insert_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $cabinet_manage->insert_user_id) . "\"\n";
+            $ini .= "updated_at      = \"" . $this->getCCDatetime($cabinet_manage->update_time) . "\"\n";
+            $ini .= "updated_name    = \"" . $cabinet_manage->update_user_name . "\"\n";
+            $ini .= "update_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $cabinet_manage->update_user_id) . "\"\n";
 
             // ファイル情報
             $cabinet_files = Nc2CabinetFile::select('cabinet_file.*', 'cabinet_comment.comment')
@@ -8880,7 +9116,13 @@ trait MigrationTrait
                 $tsv .= $cabinet_file['file_type'] . "\t";
                 $tsv .= $cabinet_file['display_sequence'] . "\t";
                 $tsv .= $cabinet_file['room_id'] . "\t";
-                $tsv .= $cabinet_file['comment'];
+                $tsv .= $cabinet_file['comment'] . "\t";
+                $tsv .= $this->getCCDatetime($cabinet_file->insert_time)                             . "\t";    // [13]
+                $tsv .= $cabinet_file->insert_user_name                                              . "\t";    // [14]
+                $tsv .= $this->getNc2LoginIdFromNc2UserId($nc2_users, $cabinet_file->insert_user_id) . "\t";    // [15]
+                $tsv .= $this->getCCDatetime($cabinet_file->update_time)                             . "\t";    // [16]
+                $tsv .= $cabinet_file->update_user_name                                              . "\t";    // [17]
+                $tsv .= $this->getNc2LoginIdFromNc2UserId($nc2_users, $cabinet_file->update_user_id);           // [18]
 
                 // 最終行は改行コード不要
                 if ($index !== ($cabinet_files->count() - 1)) {
@@ -8919,6 +9161,9 @@ trait MigrationTrait
         if ($nc2_counters->isEmpty()) {
             return;
         }
+
+        // nc2の全ユーザ取得
+        $nc2_users = Nc2User::get();
 
         // NC2カウンター（Counter）のループ
         foreach ($nc2_counters as $nc2_counter) {
@@ -8981,6 +9226,12 @@ trait MigrationTrait
             $ini .= "counter_block_id = " . $nc2_counter->block_id . "\n";
             $ini .= "room_id = " . $nc2_counter->room_id . "\n";
             $ini .= "module_name = \"counter\"\n";
+            $ini .= "created_at      = \"" . $this->getCCDatetime($nc2_counter->insert_time) . "\"\n";
+            $ini .= "created_name    = \"" . $nc2_counter->insert_user_name . "\"\n";
+            $ini .= "insert_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_counter->insert_user_id) . "\"\n";
+            $ini .= "updated_at      = \"" . $this->getCCDatetime($nc2_counter->update_time) . "\"\n";
+            $ini .= "updated_name    = \"" . $nc2_counter->update_user_name . "\"\n";
+            $ini .= "update_login_id = \"" . $this->getNc2LoginIdFromNc2UserId($nc2_users, $nc2_counter->update_user_id) . "\"\n";
 
             // カウンターの設定を出力
             $this->storagePut($this->getImportPath('counters/counter_') . $this->zeroSuppress($nc2_counter->block_id) . '.ini', $ini);
